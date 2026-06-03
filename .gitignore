@@ -1,0 +1,12 @@
+# 機密:Email 帳密,絕對不要上傳
+password.txt
+
+# Python 編譯快取
+__pycache__/
+*.pyc
+
+# 監控截圖(執行時產生,含隱私且檔案多)
+snapshots/
+
+# 本機 Claude 設定
+.claude/
