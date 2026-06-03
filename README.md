@@ -1,8 +1,10 @@
+<p align="center">
+  <img src="main.png" alt="預覽畫面" width="800">
+</p>
+
 # 居家監控 (Home Surveillance)
 
 用一支普通的電腦攝影機，做即時**移動偵測**。偵測到入侵者時自動存下截圖，並寄 Email 通知你（可附當下畫面）。
-
-![預覽畫面](main.png)
 
 ## 功能特色
 
