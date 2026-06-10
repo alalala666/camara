@@ -5,8 +5,10 @@ password.txt
 __pycache__/
 *.pyc
 
-# 監控截圖(執行時產生,含隱私且檔案多)
+# 監控截圖、錄音、錄影(執行時產生,含隱私且檔案多)
 snapshots/
+recordings/
+videos/
 
 # 本機 Claude 設定
 .claude/

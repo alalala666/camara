@@ -14,12 +14,14 @@
 import argparse
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 
 import cv2
 
 from email_notify import send_email
+from recorder import record_audio
 
 # Windows 主控台(cp950)無法顯示 ✓✗⚠ 等符號,改用 UTF-8 輸出
 try:
@@ -30,6 +32,43 @@ except Exception:
 
 
 SNAPSHOT_DIR = "snapshots"
+RECORDING_DIR = "recordings"
+VIDEO_DIR = "videos"
+
+# 避免同時開多個錄音(上一段還沒錄完又被觸發)
+_recording_busy = threading.Lock()
+
+
+def handle_intrusion(snapshot_path, ts, changed_pct, rec_seconds):
+    """背景執行緒:先寄截圖信(立即),再錄音,最後寄錄音信。不阻塞主迴圈。"""
+    # 1. 立即寄出截圖警報信
+    send_email(
+        subject="[居家安全檢測] 偵測到入侵!",
+        body=f"偵測時間: {ts}\n畫面變化: {changed_pct:.1f}%\n附件為觸發當下截圖。",
+        attachment_path=snapshot_path,
+    )
+
+    # 2. 錄音(若已有錄音進行中就略過,避免裝置衝突)
+    wav_path = None
+    if not _recording_busy.acquire(blocking=False):
+        print("[錄音] 上一段錄音尚未結束,略過本次錄音")
+        return
+    try:
+        os.makedirs(RECORDING_DIR, exist_ok=True)
+        wav_path = os.path.join(
+            RECORDING_DIR,
+            datetime.now().strftime("audio_%Y%m%d_%H%M%S.wav"),
+        )
+        print(f"[錄音] 開始錄音 {rec_seconds} 秒 ...")
+        record_audio(wav_path, rec_seconds)
+        print(f"[錄音] ✓ 完成: {wav_path}")
+    except Exception as e:
+        print(f"[錄音] ✗ 錄音失敗: {e}")
+        wav_path = None
+    finally:
+        _recording_busy.release()
+
+    # 錄音僅存檔到 recordings/,暫不寄出
 
 
 def main() -> int:
@@ -49,6 +88,10 @@ def main() -> int:
                         help="關閉 Email 通知(預設開啟,偵測到入侵會寄信)")
     parser.add_argument("--email-cooldown", type=float, default=20.0,
                         help="兩封 Email 的最短間隔秒數,避免狂寄,預設 20")
+    parser.add_argument("--no-video", action="store_true",
+                        help="關閉入侵錄影(預設開啟)")
+    parser.add_argument("--video-seconds", type=float, default=20.0,
+                        help="入侵時錄影秒數,預設 20")
     args = parser.parse_args()
 
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_DSHOW)
@@ -67,9 +110,16 @@ def main() -> int:
     print("移動偵測啟動中... (按 q 或 Esc 離開)")
     print(f"觸發門檻={args.sensitivity}%  最小面積={args.min_area}px  冷卻={args.cooldown}s")
 
+    # 錄影用的影格率(DSHOW 有時讀不到,給合理預設)
+    rec_fps = cap.get(cv2.CAP_PROP_FPS)
+    if not rec_fps or rec_fps <= 0 or rec_fps > 60:
+        rec_fps = 20.0
+
     frame_count = 0
     last_alert = 0.0
     last_email = 0.0
+    video_writer = None   # 正在錄影時為 VideoWriter,否則 None
+    video_end = 0.0       # 錄影結束的時間點
 
     while True:
         ok, frame = cap.read()
@@ -122,14 +172,37 @@ def main() -> int:
                 if not args.no_save:
                     print(f"          已存檔: {saved_path}")
 
-            # 寄 Email(獨立冷卻,避免每次觸發都寄)
+            # 寄信 + 錄音都丟到背景執行緒,避免阻塞攝影機畫面(獨立冷卻)
             if email_on and (time.time() - last_email) >= args.email_cooldown:
                 last_email = time.time()
-                send_email(
-                    subject="[居家監控] 偵測到移動!",
-                    body=f"偵測時間: {ts}\n畫面變化: {changed_pct:.1f}%\n附件為觸發當下截圖。",
-                    attachment_path=saved_path,
+                worker = threading.Thread(
+                    target=handle_intrusion,
+                    args=(saved_path, ts, changed_pct, args.email_cooldown),
+                    daemon=True,
                 )
+                worker.start()
+
+            # 開始錄影(若尚未在錄影才開新檔;一段結束後若仍有動靜會再開下一段)
+            if not args.no_video and video_writer is None:
+                os.makedirs(VIDEO_DIR, exist_ok=True)
+                vpath = os.path.join(
+                    VIDEO_DIR,
+                    datetime.now().strftime("video_%Y%m%d_%H%M%S.mp4"),
+                )
+                h, w = frame.shape[:2]
+                video_writer = cv2.VideoWriter(
+                    vpath, cv2.VideoWriter_fourcc(*"mp4v"), rec_fps, (w, h)
+                )
+                video_end = time.time() + args.video_seconds
+                print(f"          開始錄影 {args.video_seconds:.0f} 秒 -> {vpath}")
+
+        # 錄影中:寫入當前(未標記)畫面,時間到就收檔
+        if video_writer is not None:
+            video_writer.write(frame)
+            if time.time() >= video_end:
+                video_writer.release()
+                video_writer = None
+                print("          ✓ 錄影完成")
 
         if not args.no_window:
             # 在預覽畫面上標記變化區塊
@@ -147,6 +220,8 @@ def main() -> int:
             if key in (ord("q"), 27):
                 break
 
+    if video_writer is not None:
+        video_writer.release()  # 收掉中途未完成的錄影
     cap.release()
     cv2.destroyAllWindows()
     print("已停止。")

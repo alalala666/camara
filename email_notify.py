@@ -85,13 +85,17 @@ def send_email(
     msg["To"] = cfg["to"]
     msg.set_content(body)
 
-    # 附加截圖
+    # 附加檔案(自動依副檔名判斷類型,支援 jpg / wav 等)
     if attachment_path and os.path.exists(attachment_path):
+        import mimetypes
+
         with open(attachment_path, "rb") as f:
             data = f.read()
         filename = os.path.basename(attachment_path)
+        ctype, _ = mimetypes.guess_type(attachment_path)
+        maintype, _, subtype = (ctype or "application/octet-stream").partition("/")
         msg.add_attachment(
-            data, maintype="image", subtype="jpeg", filename=filename
+            data, maintype=maintype, subtype=subtype, filename=filename
         )
 
     try:
